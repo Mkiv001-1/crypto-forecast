@@ -830,6 +830,62 @@ class BybitClient:
             logger.error(f"Error fetching order history: {e}")
             return []
     
+    def get_transaction_log(
+        self,
+        *,
+        account_type: str = "UNIFIED",
+        category: Optional[str] = None,
+        currency: Optional[str] = None,
+        base_coin: Optional[str] = None,
+        trans_type: Optional[str] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 50,
+        cursor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Fetch Bybit UTA transaction log page (GET /v5/account/transaction-log).
+
+        Returns:
+            {"list": [...], "nextPageCursor": "..."} or empty list on error.
+        """
+        try:
+            params: Dict[str, Any] = {
+                "accountType": account_type,
+                "limit": min(max(limit, 1), 50),
+            }
+            if category:
+                params["category"] = category
+            if currency:
+                params["currency"] = currency.upper()
+            if base_coin:
+                params["baseCoin"] = base_coin.upper()
+            if trans_type:
+                params["type"] = trans_type
+            if start_time is not None:
+                params["startTime"] = int(start_time)
+            if end_time is not None:
+                params["endTime"] = int(end_time)
+            if cursor:
+                params["cursor"] = cursor
+
+            response = self.session.get_transaction_log(**params)
+            if response.get("retCode") != 0:
+                logger.error(
+                    "Bybit transaction log error: %s",
+                    response.get("retMsg"),
+                )
+                return {"list": [], "nextPageCursor": ""}
+
+            result = response.get("result") or {}
+            return {
+                "list": result.get("list") or [],
+                "nextPageCursor": result.get("nextPageCursor") or "",
+            }
+        except Exception as e:
+            logger.error("Error fetching transaction log: %s", e)
+            return {"list": [], "nextPageCursor": ""}
+
     # -------------------------------------------------------------------------
     # Close Position
     # -------------------------------------------------------------------------

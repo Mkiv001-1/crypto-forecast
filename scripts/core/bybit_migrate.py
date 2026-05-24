@@ -217,6 +217,18 @@ def add_bybit_config_defaults(con: sqlite3.Connection) -> bool:
             "MIN_DATA_DAYS": ("30", "Minimum days of price data required"),
             "ORDER_MODE": ("disabled", "Trading mode: disabled, paper, live"),
             "LIVE_TRADING_CONFIRMED": ("false", "Confirm live trading enabled"),
+            "BYBIT_TRANSACTION_LOG_SYNC_INTERVAL_MINUTES": (
+                "60",
+                "How often to sync Bybit UTA transaction log (minutes)",
+            ),
+            "BYBIT_TRANSACTION_LOG_SYNC_LOOKBACK_DAYS": (
+                "7",
+                "Default lookback days for Bybit UTA transaction log sync",
+            ),
+            "LAST_BYBIT_TRANSACTION_LOG_SYNC_AT": (
+                "",
+                "Last successful Bybit UTA transaction log sync (ISO UTC)",
+            ),
         }
         
         for key, (value, description) in bybit_defaults.items():
@@ -272,6 +284,58 @@ def create_bybit_transactions_table(con: sqlite3.Connection) -> bool:
         return True
     except Exception as e:
         logger.error(f"Error creating bybit_order_transactions table: {e}")
+        return False
+
+
+def create_bybit_uta_transaction_log_table(con: sqlite3.Connection) -> bool:
+    """Bybit Unified Trading Account transaction log (exchange ledger, not bot audit)."""
+    try:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS bybit_uta_transaction_log (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                bybit_id          TEXT    NOT NULL UNIQUE,
+                transaction_time  TEXT    NOT NULL,
+                currency          TEXT    DEFAULT '',
+                symbol            TEXT    DEFAULT '',
+                category          TEXT    DEFAULT '',
+                type              TEXT    DEFAULT '',
+                direction         TEXT    DEFAULT '',
+                side              TEXT    DEFAULT '',
+                qty               TEXT    DEFAULT '',
+                size              TEXT    DEFAULT '',
+                trade_price       TEXT    DEFAULT '',
+                funding           TEXT    DEFAULT '',
+                fee               TEXT    DEFAULT '',
+                cash_flow         TEXT    DEFAULT '',
+                change            TEXT    DEFAULT '',
+                cash_balance      TEXT    DEFAULT '',
+                order_id          TEXT    DEFAULT '',
+                trade_id          TEXT    DEFAULT '',
+                fee_rate          TEXT    DEFAULT '',
+                trans_sub_type    TEXT    DEFAULT '',
+                synced_at         TEXT    DEFAULT ''
+            )
+        """)
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_uta_tx_time "
+            "ON bybit_uta_transaction_log(transaction_time)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_uta_tx_currency "
+            "ON bybit_uta_transaction_log(currency)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_uta_tx_symbol "
+            "ON bybit_uta_transaction_log(symbol)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_uta_tx_type "
+            "ON bybit_uta_transaction_log(type)"
+        )
+        logger.debug("Created bybit_uta_transaction_log table")
+        return True
+    except Exception as e:
+        logger.error(f"Error creating bybit_uta_transaction_log table: {e}")
         return False
 
 
@@ -339,6 +403,7 @@ def migrate_to_bybit(db_file: str) -> bool:
             migrate_price_data_table(con)
             migrate_heartbeat_log(con)
             create_bybit_transactions_table(con)
+            create_bybit_uta_transaction_log_table(con)
             create_bybit_gateway_log_table(con)
             add_bybit_config_defaults(con)
             

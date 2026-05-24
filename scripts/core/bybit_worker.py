@@ -134,6 +134,9 @@ def _execute_op(op: str, kwargs: Dict[str, Any]) -> Any:
     if op == "get_order_history":
         return client.get_order_history(**kwargs)
     
+    if op == "get_transaction_log":
+        return client.get_transaction_log(**kwargs)
+    
     # Test/utility operations
     if op == "test_connection":
         return client.test_connection()

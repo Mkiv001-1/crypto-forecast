@@ -78,10 +78,75 @@ class ForecastApiClient:
             params["include_summary"] = "true"
         return self._get("/portfolio/history", params=params)
 
-    def trigger_portfolio_history_snapshot(self) -> dict:
-        """Принудительно сделать снимок портфеля (ручной refresh)."""
+    def trigger_portfolio_history_snapshot(
+        self,
+        *,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        currency: Optional[str] = None,
+        trans_type: Optional[str] = None,
+    ) -> dict:
+        """Принудительно сделать снимок портфеля и синхронизировать transaction log."""
         url = f"{self.server_url}/portfolio/history/snapshot"
-        resp = self._session.post(url, json={}, timeout=max(self.timeout, 45))
+        body: dict = {}
+        if date_from:
+            body["date_from"] = date_from
+        if date_to:
+            body["date_to"] = date_to
+        if currency:
+            body["currency"] = currency
+        if trans_type:
+            body["type"] = trans_type
+        resp = self._session.post(
+            url, json=body, timeout=max(self.timeout, 90)
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_portfolio_transaction_log(
+        self,
+        *,
+        currency: Optional[str] = None,
+        symbol: Optional[str] = None,
+        trans_type: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        limit: int = 500,
+    ) -> dict:
+        """Return Bybit UTA transaction log rows from local DB."""
+        params: dict = {"limit": limit}
+        if currency:
+            params["currency"] = currency
+        if symbol:
+            params["symbol"] = symbol
+        if trans_type:
+            params["type"] = trans_type
+        if date_from:
+            params["date_from"] = date_from
+        if date_to:
+            params["date_to"] = date_to
+        return self._get("/portfolio/transaction-log", params=params)
+
+    def sync_portfolio_transaction_log(
+        self,
+        *,
+        currency: Optional[str] = None,
+        trans_type: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+    ) -> dict:
+        """Pull Bybit UTA transaction log into local DB."""
+        params: dict = {}
+        if currency:
+            params["currency"] = currency
+        if trans_type:
+            params["type"] = trans_type
+        if date_from:
+            params["date_from"] = date_from
+        if date_to:
+            params["date_to"] = date_to
+        url = f"{self.server_url}/portfolio/transaction-log/sync"
+        resp = self._session.post(url, params=params, timeout=max(self.timeout, 90))
         resp.raise_for_status()
         return resp.json()
 
@@ -143,6 +208,10 @@ class ForecastApiClient:
 
     def run_forecast(self) -> RunResponse:
         data = self._post("/run/forecast")
+        return RunResponse(**data)
+
+    def run_forecast_ticker(self, ticker: str) -> RunResponse:
+        data = self._post(f"/run/forecast/{ticker.strip().upper()}")
         return RunResponse(**data)
 
     def run_evaluate(self) -> RunResponse:

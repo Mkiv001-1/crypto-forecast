@@ -200,11 +200,20 @@ def build_prompt(db_manager, ticker, ind, method, price_data=None):
         except Exception:
             return default
 
+    from scripts.core.market_regime import format_regime_context
+    regime_ctx = format_regime_context(ind, method=method)
+
     ctx = {
         "ticker":         ticker,
         "forecast_date":  forecast_date,
         "horizon":        horizon,
-        "market_regime":  ind.get('market_regime', 'N/A'),
+        "market_regime":  regime_ctx["market_regime"],
+        "regime_rationale":   regime_ctx["regime_rationale"],
+        "adx_strength":       regime_ctx["adx_strength"],
+        "ma_structure":       regime_ctx["ma_structure"],
+        "price_vs_ma20":      regime_ctx["price_vs_ma20"],
+        "regime_block":       regime_ctx["regime_block"],
+        "regime_method_hint": regime_ctx["regime_method_hint"],
         "market_context": mkt_ctx,
         "history":        history,
         "footer":         _prompt_footer(db_manager),
@@ -324,6 +333,11 @@ def build_prompt_fallback(ticker, ind, method, db_manager=None):
         except Exception:
             pass
 
+    from scripts.core.market_regime import format_regime_context
+    regime_ctx = format_regime_context(ind, method=method)
+    method_hint = regime_ctx["regime_method_hint"]
+    method_hint_line = f"\nУчёт режима для метода: {method_hint}" if method_hint else ""
+
     base_prompt = f"""Сделай торговый прогноз для {ticker} на {forecast_date}.
 
 КРИТИЧЕСКИ ВАЖНО — ПРИВЯЗКА ЦЕН:
@@ -336,7 +350,8 @@ def build_prompt_fallback(ticker, ind, method, db_manager=None):
 - Уровни вне этих диапазонов будут АВТОМАТИЧЕСКИ ОТКЛОНЕНЫ системой
 
 Горизонт прогноза: {horizon} календарных дней (UTC).
-Рыночный режим: {ind.get('market_regime', 'N/A')} (ADX={ind.get('adx14', 0):.1f})
+
+{regime_ctx["regime_block"]}{method_hint_line}
 
 РЫНОЧНЫЙ КОНТЕКСТ:
 {mkt_ctx}

@@ -28,6 +28,7 @@ from PyQt6.QtGui import QColor, QFont, QBrush
 from scripts.shared.models import ForecastLog, TickerSetting, ProviderSetting, PositionRecord, AccountRecord, ConsensusRecord
 from scripts.client.api_client import ForecastApiClient
 from scripts.client.constants import METHODS, _METHOD_LABELS
+from scripts.client.tabs.bybit_settings_sub_tab import _VARIABLES_HELP
 from datetime import date
 
 class PromptsTab(QWidget):

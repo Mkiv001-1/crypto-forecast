@@ -209,49 +209,68 @@ def run_trading_bot(db_file: str = None, run_id: int = None, db_manager=None):
                 pass
         raise
 
-def test_single_ticker(ticker='BTCUSDT', db_file: str = None):
-    """Тестирование робота на одном тикере с созданием run"""
+def _init_bybit_client(db_manager):
+    """Initialize Bybit client from DB config. Returns client or None."""
     try:
-        logging.info(f"🧪 Тестирование на тикере {ticker}")
+        from scripts.core.bybit_config import load_bybit_config, validate_api_credentials
+        from scripts.core.bybit_client import init_bybit_client, get_bybit_client
+        config = load_bybit_config(db_manager)
+        is_valid, error = validate_api_credentials(config)
+        if is_valid:
+            init_bybit_client(
+                api_key=config.api_key,
+                api_secret=config.api_secret,
+                demo=config.demo,
+                recv_window=config.recv_window,
+            )
+            client = get_bybit_client()
+            logging.info(f"📡 Bybit client initialized (demo={config.demo})")
+            return client
+        logging.warning(f"⚠️ Invalid Bybit credentials: {error}")
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to initialize Bybit client: {e}")
+    return None
 
-        from scripts.core.sqlite_manager import SQLiteManager
-        import os
+
+def run_single_ticker_forecast(ticker: str, db_file: str = None, db_manager=None) -> int:
+    """Run forecast + consensus pipeline for one ticker. Returns run_id or None."""
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        raise ValueError("Ticker is required")
+
+    from scripts.core.sqlite_manager import SQLiteManager
+    if db_manager is None:
         if not db_file:
             from scripts.server.config import get_db_path
             db_file = get_db_path()
         db_manager = SQLiteManager(db_file)
 
-        # Initialize Bybit client for price data fetching
-        try:
-            from scripts.core.bybit_config import load_bybit_config, validate_api_credentials
-            from scripts.core.bybit_client import init_bybit_client, get_bybit_client
-            config = load_bybit_config(db_manager)
-            is_valid, error = validate_api_credentials(config)
-            if is_valid:
-                init_bybit_client(
-                    api_key=config.api_key,
-                    api_secret=config.api_secret,
-                    demo=config.demo,
-                    recv_window=config.recv_window,
-                )
-                client = get_bybit_client()
-                logging.info(f"📡 Bybit client initialized (demo={config.demo})")
-            else:
-                logging.warning(f"⚠️ Invalid Bybit credentials: {error}")
-                client = None
-        except Exception as e:
-            logging.warning(f"⚠️ Failed to initialize Bybit client: {e}")
-            client = None
-
-        # Создаём run для теста
-        run_id = db_manager.create_forecast_run('manual', 1)
+    logging.info(f"🚀 Manual forecast run for {ticker}")
+    client = _init_bybit_client(db_manager)
+    run_id = db_manager.create_forecast_run("manual", 1)
+    try:
         _, has_consensus = process_ticker(db_manager, ticker, run_id=run_id, client=client)
         consensus_count = 1 if has_consensus else 0
-        db_manager.complete_forecast_run(run_id, status='completed', tickers_processed=1, consensus_count=consensus_count)
+        db_manager.complete_forecast_run(
+            run_id,
+            status="completed",
+            tickers_processed=1,
+            consensus_count=consensus_count,
+        )
+        logging.info(f"✅ Forecast for {ticker} complete, run #{run_id}")
+        return run_id
+    except Exception as e:
+        db_manager.complete_forecast_run(run_id, status="failed", error_message=str(e))
+        raise
 
+
+def test_single_ticker(ticker='BTCUSDT', db_file: str = None):
+    """Тестирование робота на одном тикере с созданием run"""
+    try:
+        logging.info(f"🧪 Тестирование на тикере {ticker}")
+        run_id = run_single_ticker_forecast(ticker, db_file=db_file)
         logging.info(f"✅ Тест для {ticker} завершен, run #{run_id}")
         return run_id
-
     except Exception as e:
         logging.error(f"❌ Ошибка теста: {e}")
         return None

@@ -143,9 +143,10 @@ class TestBybitOrderStatusSyncMain:
         with patch("bybit_order_status_sync.is_bybit_running", return_value=False):
             result = sync_orders_with_bybit(mock_db)
         
-        # Should return empty/skipped result
-        assert result["checked"] == 0
-        assert result["updated"] == 0
+        assert result["ok"] is False
+        assert result["scanned"] == 0
+        assert result["updated_orders"] == 0
+        assert "Bybit worker" in result["errors"][0]
 
     def test_sync_orders_no_orders_in_db(self, mock_db):
         """Test sync when no orders in database."""
@@ -155,8 +156,9 @@ class TestBybitOrderStatusSyncMain:
             with patch("bybit_order_status_sync.bybit_request_sync", return_value=[]):
                 result = sync_orders_with_bybit(mock_db)
         
-        assert result["checked"] == 0
-        assert result["updated"] == 0
+        assert result["ok"] is True
+        assert result["scanned"] == 0
+        assert result["updated_orders"] == 0
 
     def test_sync_orders_with_pending_orders(self, mock_db):
         """Test sync updates pending orders."""
@@ -173,11 +175,11 @@ class TestBybitOrderStatusSyncMain:
         # Mock Bybit response - order is now filled
         mock_bybit_orders = [
             {
-                "orderId": "order-123",
-                "orderLinkId": "link-123",
-                "orderStatus": "Filled",
-                "avgPrice": "50000.00",
-                "cumExecQty": "0.1"
+                "order_id": "order-123",
+                "order_link_id": "link-123",
+                "status": "Filled",
+                "cum_exec_qty": 0.1,
+                "cum_exec_value": 5000.0,
             }
         ]
         
@@ -185,8 +187,8 @@ class TestBybitOrderStatusSyncMain:
             with patch("bybit_order_status_sync.bybit_request_sync", return_value=mock_bybit_orders):
                 result = sync_orders_with_bybit(mock_db)
         
-        # Should check at least one order (may be 0 if filtering logic excludes it)
-        assert "checked" in result
+        assert result["ok"] is True
+        assert result["scanned"] >= 1
         # Order status checked (may or may not be updated depending on sync logic)
         with mock_db._connect() as con:
             row = con.execute("SELECT status FROM orders WHERE bybit_order_id='order-123'").fetchone()
@@ -205,7 +207,12 @@ class TestBybitOrderStatusSyncMain:
             con.commit()
         
         mock_bybit_orders = [
-            {"orderId": "order-123", "orderStatus": "Filled", "avgPrice": "50000.00"}
+            {
+                "order_id": "order-123",
+                "status": "Filled",
+                "cum_exec_qty": 0.1,
+                "cum_exec_value": 5000.0,
+            }
         ]
         
         with patch("bybit_order_status_sync.is_bybit_running", return_value=True):
@@ -234,15 +241,20 @@ class TestBybitOrderStatusSyncMain:
             con.commit()
         
         mock_bybit_orders = [
-            {"orderId": "btc-order", "orderLinkId": "btc-link", "orderStatus": "Filled", "avgPrice": "50000.00"}
+            {
+                "order_id": "btc-order",
+                "status": "Filled",
+                "cum_exec_qty": 0.1,
+                "cum_exec_value": 5000.0,
+            }
         ]
-        
+
         with patch("bybit_order_status_sync.is_bybit_running", return_value=True):
             with patch("bybit_order_status_sync.bybit_request_sync", return_value=mock_bybit_orders):
                 result = sync_orders_with_bybit(mock_db, ticker="BTCUSDT")
-        
-        # Should return result with checked field
-        assert "checked" in result
+
+        assert result["ok"] is True
+        assert result["scanned"] >= 1
 
     def test_sync_orders_source_parameter(self, mock_db):
         """Test source parameter is accepted (used by scheduler)."""
@@ -253,7 +265,7 @@ class TestBybitOrderStatusSyncMain:
                 # This is how scheduler calls it
                 result = sync_orders_with_bybit(mock_db, source="scheduler")
         
-        assert "checked" in result
+        assert result["ok"] is True
 
 
 class TestLogStatusTransaction:
@@ -317,8 +329,9 @@ class TestBybitMigrateOrdersSchema:
             with patch("bybit_order_status_sync.bybit_request_sync", return_value=[]):
                 result = sync_orders_with_bybit(mock_db)
 
-        assert result["errors"] == 0
-        assert result["checked"] == 1
+        assert result["ok"] is True
+        assert result["errors"] == []
+        assert result["scanned"] == 1
 
 
 class TestBybitOrderStatusSyncSchedulerIntegration:
@@ -333,9 +346,8 @@ class TestBybitOrderStatusSyncSchedulerIntegration:
             with patch("bybit_order_status_sync.bybit_request_sync", return_value=[]):
                 result = sync_orders_with_bybit(mock_db, source="scheduler")
         
-        # Should work without errors
         assert isinstance(result, dict)
-        assert "checked" in result
+        assert result["ok"] is True
 
 
 if __name__ == "__main__":

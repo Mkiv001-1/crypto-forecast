@@ -752,8 +752,10 @@ def _run_order_status_sync_sync() -> None:
     db = SQLiteManager(db_file)
 
     result = sync_orders_with_bybit(db, source="scheduler")
-    if result.get("errors", 0) > 0 and result.get("checked", 0) == 0:
-        raise RuntimeError(f"order status sync failed: {result.get('errors', 0)} error(s)")
+    if not result.get("ok", False):
+        errors = result.get("errors") or []
+        detail = errors[0] if errors else "order status sync failed"
+        raise RuntimeError(detail)
 
 
 async def _await_blocking(sync_fn) -> None:
@@ -782,6 +784,31 @@ async def _scheduled_portfolio_history_snapshot_task() -> None:
         logger.info("scheduler: portfolio_history_snapshot inserted %d row(s)", inserted)
     else:
         logger.warning("scheduler: portfolio_history_snapshot failed - no unified wallet data")
+
+
+def _run_bybit_transaction_log_sync_sync() -> None:
+    """Sync Bybit UTA transaction log — executed in thread pool."""
+    _prepare_worker_cwd()
+    from scripts.core.bybit_worker import is_running as _bybit_running
+    if not _bybit_running():
+        logger.debug("scheduler: bybit_transaction_log_sync skipped — worker not running")
+        return
+    from scripts.core.sqlite_manager import SQLiteManager
+    from scripts.core.bybit_transaction_log_sync import sync_bybit_transaction_log
+
+    db_file = _state.db_manager.db_file if _state.db_manager else None
+    db = SQLiteManager(db_file)
+    result = sync_bybit_transaction_log(db)
+    logger.info(
+        "scheduler: bybit_transaction_log_sync fetched=%s synced=%s",
+        result.get("fetched"),
+        result.get("synced"),
+    )
+
+
+async def _scheduled_bybit_transaction_log_sync_task() -> None:
+    """Run Bybit UTA transaction log sync in a thread pool."""
+    await _await_blocking(_run_bybit_transaction_log_sync_sync)
 
 
 def _run_portfolio_sync_sync() -> None:
@@ -828,6 +855,7 @@ _TASK_FACTORIES = {
     "sync_order_statuses": _scheduled_order_status_sync_task,
     "portfolio_sync": _scheduled_portfolio_sync_task,
     "portfolio_history_snapshot": _scheduled_portfolio_history_snapshot_task,
+    "bybit_transaction_log_sync": _scheduled_bybit_transaction_log_sync_task,
     "update_price_data": _scheduled_price_data_task,
     "update_intraday": _scheduled_intraday_task,
     "scheduled_forecast": _scheduled_forecast_task,
@@ -861,6 +889,9 @@ def _task_interval_specs(db_manager=None) -> list[tuple[str, int, bool]]:
     order_status_sync_interval = _cfg_int_for(mgr, "ORDER_STATUS_SYNC_INTERVAL_SECONDS", 60)
     portfolio_history_interval = _cfg_int_for(mgr, "PORTFOLIO_HISTORY_SNAPSHOT_INTERVAL_MINUTES", 1440) * 60
     portfolio_sync_interval = _cfg_int_for(mgr, "PORTFOLIO_SYNC_INTERVAL_MINUTES", 5) * 60
+    transaction_log_interval = (
+        _cfg_int_for(mgr, "BYBIT_TRANSACTION_LOG_SYNC_INTERVAL_MINUTES", 60) * 60
+    )
     logs_evaluate_interval = _cfg_int_for(mgr, "LOGS_EVALUATE_INTERVAL_MINUTES", 120) * 60
 
     return [
@@ -872,6 +903,7 @@ def _task_interval_specs(db_manager=None) -> list[tuple[str, int, bool]]:
         ("sync_order_statuses", order_status_sync_interval, False),
         ("portfolio_sync", portfolio_sync_interval, True),
         ("portfolio_history_snapshot", portfolio_history_interval, False),
+        ("bybit_transaction_log_sync", transaction_log_interval, False),
         ("update_price_data", price_data_interval, False),
         ("update_intraday", intraday_interval, False),
         ("scheduled_forecast", forecast_interval, False),

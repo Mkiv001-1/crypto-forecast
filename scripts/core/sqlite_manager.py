@@ -477,6 +477,9 @@ _DEFAULT_CONFIG = [
     ("HEARTBEAT_OPENROUTER_GRACE_SEC","120",        "Grace period before circuit-open triggers degradation"),
     ("PORTFOLIO_HISTORY_SNAPSHOT_INTERVAL_MINUTES", "1440", "How often to collect portfolio history snapshot (minutes)"),
     ("PORTFOLIO_SYNC_INTERVAL_MINUTES", "5",       "How often to sync Portfolio table from Bybit (minutes)"),
+    ("BYBIT_TRANSACTION_LOG_SYNC_INTERVAL_MINUTES", "60", "Bybit UTA transaction log sync interval (minutes)"),
+    ("BYBIT_TRANSACTION_LOG_SYNC_LOOKBACK_DAYS", "7", "Default lookback days for Bybit UTA transaction log sync"),
+    ("LAST_BYBIT_TRANSACTION_LOG_SYNC_AT", "", "Last successful Bybit UTA transaction log sync (ISO UTC)"),
     # Order activation pipeline
     ("SKIP_FORECAST_WHEN_EXPOSED",   "true",       "Skip LLM forecasts when ticker has open order or position"),
     ("FORECAST_TTL_MINUTES",         "240",        "Signal TTL in minutes — PENDING_ORDER older than this becomes EXPIRED"),
@@ -552,7 +555,10 @@ _DEFAULT_ORDER_TYPES = [
 
 _DEFAULT_PROMPT_TEMPLATES = [
     ("momentum_trend", """Сделай торговый прогноз для {ticker} на {forecast_date} (горизонт {horizon} дней).
-Рыночный режим: {market_regime} (ADX={adx:.1f})
+
+{regime_block}
+
+Учёт режима для метода: {regime_method_hint}
 {market_context}
 ТЕХНИЧЕСКИЕ ДАННЫЕ:
 - Цена: ${price:.2f} | MA20: ${ma20:.2f} | MA50: ${ma50:.2f} | MA200: ${ma200:.2f}
@@ -564,15 +570,17 @@ _DEFAULT_PROMPT_TEMPLATES = [
 {recent_candles}
 
 МЕТОД: MOMENTUM TREND — АЛГОРИТМ АНАЛИЗА:
-1. СИЛА ТРЕНДА: ADX={adx:.1f} → при ADX>25 сильный тренд, при ADX<20 — sideways, избегай трендовых сделок.
-2. НАПРАВЛЕНИЕ: EMA9 vs EMA21 — бычий если EMA9>EMA21, медвежий если EMA9<EMA21.
-3. ПОДТВЕРЖДЕНИЕ MA: цена выше MA20+MA50 = двойное бычье подтверждение; ниже = медвежье.
-4. ИМПУЛЬС: MACD hist>0 и растёт = усиление бычьего импульса; <0 и падает = медвежий.
-5. ОБЪЁМ: OBV {obv_trend} — подтверждает или опровергает направление.
-6. ФИЛЬТР RSI: RSI>70 при LONG = риск перекупленности, снизь confidence; RSI<30 при SHORT = риск отскока.
-СИГНАЛ LONG: ADX>25 + EMA9>EMA21 + цена>MA50 + MACD hist>0 + OBV растёт → высокий confidence (65-80).
-СИГНАЛ SHORT: ADX>25 + EMA9<EMA21 + цена<MA50 + MACD hist<0 + OBV падает → высокий confidence (65-80).
-NEUTRAL: ADX<20 или противоречивые сигналы → confidence<50.
+1. СИЛА ДВИЖЕНИЯ (ADX): ADX={adx:.1f} → {adx_strength}. Это НЕ то же самое, что режим {market_regime}.
+2. СИСТЕМНЫЙ РЕЖИМ: {market_regime} — {regime_rationale}. Структура MA: {ma_structure}, цена {price_vs_ma20}.
+3. НАПРАВЛЕНИЕ: EMA9 vs EMA21 — бычий если EMA9>EMA21, медвежий если EMA9<EMA21.
+4. ПОДТВЕРЖДЕНИЕ MA: цена выше MA20+MA50 = двойное бычье подтверждение; ниже = медвежье.
+5. ИМПУЛЬС: MACD hist>0 и растёт = усиление бычьего импульса; <0 и падает = медвежий.
+6. ОБЪЁМ: OBV {obv_trend} — подтверждает или опровергает направление.
+7. ФИЛЬТР RSI: RSI>70 при LONG = риск перекупленности, снизь confidence; RSI<30 при SHORT = риск отскока.
+СИГНАЛ LONG (высокий confidence): режим STRONG_UPTREND + EMA9>EMA21 + цена>MA50 + MACD hist>0 + OBV растёт → 65-80.
+СИГНАЛ LONG (умеренный): режим WEAK_TREND + ADX>25 + EMA9>EMA21 + ≥2 подтверждения → 55-65.
+СИГНАЛ SHORT (высокий confidence): режим STRONG_DOWNTREND + EMA9<EMA21 + цена<MA50 + MACD hist<0 + OBV падает → 65-80.
+NEUTRAL: режим RANGING, или WEAK_TREND без согласованных EMA/MA/OBV, или противоречивые сигналы → confidence<50.
 ЦЕНОВЫЕ УРОВНИ (только от текущей цены ${price:.2f}):
 - entry_limit_price: ±3% от ${price:.2f} (диапазон: ${price_m3:.2f}–${price_p3:.2f})
 - stop_loss LONG: на ${price_m5:.2f}–${price_m2:.2f} (ниже MA или ATR-стоп)
@@ -582,26 +590,32 @@ NEUTRAL: ADX<20 или противоречивые сигналы → confidenc
 {footer}"""),
 
     ("price_action", """Сделай торговый прогноз для {ticker} на {forecast_date} (горизонт {horizon} дней).
-Рыночный режим: {market_regime} (ADX={adx:.1f})
+
+{regime_block}
+
+Учёт режима для метода: {regime_method_hint}
 {market_context}
 ТЕХНИЧЕСКИЕ ДАННЫЕ:
 - Цена: ${price:.2f} | BB верх: ${bb_upper:.2f} | BB низ: ${bb_lower:.2f} | Позиция в BB: {bb_pos:.0f}%
 - Stoch RSI: {stoch_rsi:.2f} | RSI: {rsi:.1f} | ATR: {atr_pct:.1f}% | BB ширина: {bb_width:.2f}
-- MA20: ${ma20:.2f} (откл. {ma20_dev:+.1f}%) | MA50: ${ma50:.2f}
+- MA20: ${ma20:.2f} (откл. {ma20_dev:+.1f}%) | MA50: ${ma50:.2f} | MA200: ${ma200:.2f}
+- Структура MA: {ma_structure} | Цена {price_vs_ma20}
 - Динамика: 5д={change_5d:+.1f}% 20д={change_20d:+.1f}%
 
 ПОСЛЕДНИЕ 5 СВЕЧЕЙ (актуальные OHLCV — анализировать паттерны разворота/продолжения):
 {recent_candles}
 
 МЕТОД: PRICE ACTION — АЛГОРИТМ АНАЛИЗА:
+0. КОНТЕКСТ РЕЖИМА: {market_regime} — {regime_rationale}. ADX={adx:.1f} ({adx_strength}) — сила движения, не метка режима.
 1. ПОЗИЦИЯ В BB ({bb_pos:.0f}%): >85% = жёсткое сопротивление, <15% = жёсткая поддержка, 40-60% = нейтральная зона.
 2. ПЕРЕКУПЛЕННОСТЬ/ПЕРЕПРОДАННОСТЬ: RSI>70 + Stoch RSI>0.8 = перекуплен (SHORT-биас); RSI<30 + Stoch RSI<0.2 = перепродан (LONG-биас).
 3. СВЕЧНЫЕ ПАТТЕРНЫ: анализируй последние 3 свечи — пин-бары, поглощение, доджи у уровней BB.
-4. ПОДДЕРЖКА/СОПРОТИВЛЕНИЕ: MA20=${ma20:.2f} и MA50=${ma50:.2f} — ключевые уровни. Цена отскочила или пробила?
+4. ПОДДЕРЖКА/СОПРОТИВЛЕНИЕ: MA20=${ma20:.2f}, MA50=${ma50:.2f}, MA200=${ma200:.2f} — ключевые уровни. Цена отскочила или пробила?
 5. ATR-ФИЛЬТР: ATR={atr_pct:.1f}% — при ATR>4% волатильность высокая, расширяй стопы; при ATR<1.5% — узкие диапазоны.
 6. ПОДТВЕРЖДЕНИЕ: сигнал сильнее если RSI + Stoch RSI + позиция в BB указывают в одну сторону.
-СИГНАЛ LONG: BB-позиция<20% + RSI<35 + Stoch RSI<0.3 + бычья свеча → confidence 60-75.
-СИГНАЛ SHORT: BB-позиция>80% + RSI>65 + Stoch RSI>0.7 + медвежья свеча → confidence 60-75.
+СИГНАЛ LONG: BB-позиция<20% + RSI<35 + Stoch RSI<0.3 + бычья свеча → confidence 60-75 (при RANGING/WEAK_TREND).
+СИГНАЛ SHORT: BB-позиция>80% + RSI>65 + Stoch RSI>0.7 + медвежья свеча → confidence 60-75 (при RANGING/WEAK_TREND).
+NEUTRAL: STRONG_* без паттерна по тренду, или WEAK_TREND без подтверждения 2–3 свечами → confidence<50.
 ЦЕНОВЫЕ УРОВНИ (только от текущей цены ${price:.2f}):
 - entry_limit_price: вход у ключевого уровня ±2% от ${price:.2f}
 - stop_loss: за BB-границу или MA, не более 8% от входа
@@ -610,11 +624,15 @@ NEUTRAL: ADX<20 или противоречивые сигналы → confidenc
 {footer}"""),
 
     ("relative_strength", """Сделай торговый прогноз для {ticker} на {forecast_date} (горизонт {horizon} дней).
-Рыночный режим: {market_regime} (ADX={adx:.1f})
+
+{regime_block}
+
+Учёт режима для метода: {regime_method_hint}
 {market_context}
 ТЕХНИЧЕСКИЕ ДАННЫЕ:
-- Цена: ${price:.2f} | RSI(14): {rsi:.1f} | ADX: {adx:.1f}
+- Цена: ${price:.2f} | RSI(14): {rsi:.1f} | ADX: {adx:.1f} ({adx_strength})
 - EMA9: ${ema9:.2f} | EMA21: ${ema21:.2f} | MA50: ${ma50:.2f} | MA200: ${ma200:.2f}
+- Структура MA: {ma_structure} | Цена {price_vs_ma20}
 - Динамика: 5д={change_5d:+.1f}% 10д={change_10d:+.1f}% 20д={change_20d:+.1f}% 50д={change_50d:+.1f}%
 - Объём: {volume_current} ({vol_ratio:.1f}x среднего) | OBV: {obv_trend}
 
@@ -622,18 +640,20 @@ NEUTRAL: ADX<20 или противоречивые сигналы → confidenc
 {recent_candles}
 
 МЕТОД: RELATIVE STRENGTH — АЛГОРИТМ АНАЛИЗА:
-1. МНОГОПЕРИОДНАЯ ДИНАМИКА: оцени консистентность роста/падения по всем таймфреймам (5д/10д/20д/50д).
+1. РЕЖИМ: {market_regime} — {regime_rationale}. Сравни динамику тикера с BTC/ETH из рыночного контекста.
+2. МНОГОПЕРИОДНАЯ ДИНАМИКА: оцени консистентность роста/падения по всем таймфреймам (5д/10д/20д/50д).
    - Все периоды положительные = устойчивый uptrend (LONG-биас)
    - Все периоды отрицательные = устойчивый downtrend (SHORT-биас)
-   - Расхождение периодов = ослабление тренда, снизь confidence
-2. УСКОРЕНИЕ/ЗАМЕДЛЕНИЕ: сравни 5д vs 20д динамику. Если 5д > 20д → ускорение; 5д < 20д → замедление.
-3. RSI КАК МЕРА СИЛЫ: RSI 50-70 = зона силы (подтверждает LONG); RSI 30-50 = зона слабости (подтверждает SHORT); RSI>70 = перекупленность, жди коррекции.
-4. ОБЪЁМНОЕ ПОДТВЕРЖДЕНИЕ: рост цены + объём {vol_ratio:.1f}x среднего → подтверждённый импульс.
+   - Расхождение периодов = ослабление тренда, снизь confidence (особенно при WEAK_TREND)
+3. УСКОРЕНИЕ/ЗАМЕДЛЕНИЕ: сравни 5д vs 20д динамику. Если 5д > 20д → ускорение; 5д < 20д → замедление.
+4. RSI КАК МЕРА СИЛЫ: RSI 50-70 = зона силы (подтверждает LONG); RSI 30-50 = зона слабости (подтверждает SHORT); RSI>70 = перекупленность, жди коррекции.
+5. ОБЪЁМНОЕ ПОДТВЕРЖДЕНИЕ: рост цены + объём {vol_ratio:.1f}x среднего → подтверждённый импульс.
    При vol_ratio>1.5 движение более надёжно.
-5. MA-СТРУКТУРА: цена выше MA50 и MA200 = бычья структура рынка; ниже = медвежья.
-6. OBV: {obv_trend} — институциональное накопление/распределение.
-СИЛЬНЫЙ СИГНАЛ LONG: 5д>0% + 20д>0% + 50д>0% + RSI 55-70 + vol_ratio>1.2 + цена>MA50 → confidence 65-80.
-СИЛЬНЫЙ СИГНАЛ SHORT: 5д<0% + 20д<0% + 50д<0% + RSI 30-45 + цена<MA50 → confidence 65-80.
+6. MA-СТРУКТУРА: {ma_structure}. Цена выше MA50 и MA200 = бычья структура; ниже = медвежья.
+7. OBV: {obv_trend} — институциональное накопление/распределение.
+СИЛЬНЫЙ СИГНАЛ LONG: режим STRONG_UPTREND + 5д>0% + 20д>0% + 50д>0% + RSI 55-70 + vol_ratio>1.2 + цена>MA50 → 65-80.
+СИЛЬНЫЙ СИГНАЛ SHORT: режим STRONG_DOWNTREND + 5д<0% + 20д<0% + 50д<0% + RSI 30-45 + цена<MA50 → 65-80.
+NEUTRAL: RANGING без vol_ratio>1.2, или WEAK_TREND с расхождением периодов → confidence<50.
 ЦЕНОВЫЕ УРОВНИ (только от текущей цены ${price:.2f}):
 - entry_limit_price: в направлении тренда ±3% от ${price:.2f}
 - stop_loss: за MA50 или -6% от входа (меньшее из двух)
@@ -642,30 +662,35 @@ NEUTRAL: ADX<20 или противоречивые сигналы → confidenc
 {footer}"""),
 
     ("volatility", """Сделай торговый прогноз для {ticker} на {forecast_date} (горизонт {horizon} дней).
-Рыночный режим: {market_regime} (ADX={adx:.1f})
+
+{regime_block}
+
+Учёт режима для метода: {regime_method_hint}
 {market_context}
 ТЕХНИЧЕСКИЕ ДАННЫЕ:
-- Цена: ${price:.2f} | ATR(14): ${atr:.2f} ({atr_pct:.1f}%) | ADX: {adx:.1f}
+- Цена: ${price:.2f} | ATR(14): ${atr:.2f} ({atr_pct:.1f}%) | ADX: {adx:.1f} ({adx_strength})
 - BB верх: ${bb_upper:.2f} | BB низ: ${bb_lower:.2f} | Ширина BB: {bb_width:.2f} ({bb_width_pct:.1f}% цены)
 - BB позиция: {bb_pos:.0f}% | RSI: {rsi:.1f} | MACD hist: {macd_hist:+.2f}
+- Структура MA: {ma_structure} | Цена {price_vs_ma20}
 - Динамика: 5д={change_5d:+.1f}% 20д={change_20d:+.1f}%
 
 ПОСЛЕДНИЕ 5 СВЕЧЕЙ (актуальные OHLCV — ключевые для определения направления пробоя):
 {recent_candles}
 
 МЕТОД: VOLATILITY BREAKOUT — АЛГОРИТМ АНАЛИЗА:
-1. РЕЖИМ ВОЛАТИЛЬНОСТИ: BB-ширина={bb_width:.2f} ({bb_width_pct:.1f}% цены).
+1. СИСТЕМНЫЙ РЕЖИМ: {market_regime} — {regime_rationale}. При RANGING + BB-сжатие — основной сценарий пробоя.
+2. РЕЖИМ ВОЛАТИЛЬНОСТИ: BB-ширина={bb_width:.2f} ({bb_width_pct:.1f}% цены).
    - <2% цены = сжатие (squeeze), высокая вероятность пробоя → повышенный confidence
    - 2-4% = нормальная волатильность
    - >6% цены = расширение (после пробоя), возможен откат
-2. ATR-ОЦЕНКА: ATR={atr_pct:.1f}% — размер стопа = 1.5×ATR от входа. Стоп для текущего ATR ≈ ${atr_stop_15:.2f}.
-3. НАПРАВЛЕНИЕ ПРОБОЯ: анализируй последние свечи — куда давление? Цена у верхней BB ({bb_pos:.0f}%) → вероятный пробой вверх; у нижней → вниз.
-4. ПОДТВЕРЖДЕНИЕ ADX: ADX={adx:.1f}. При сжатии BB + ADX начинает расти → пробой формируется. ADX>30 после сжатия = подтверждённый тренд.
-5. RSI ПРИ ПРОБОЕ: RSI>55 при пробое вверх = бычье подтверждение; RSI<45 при пробое вниз = медвежье.
-6. ЛОЖНЫЙ ПРОБОЙ: если цена вышла за BB и вернулась = ловушка. Торгуй в обратном направлении.
-СИГНАЛ LONG (пробой вверх): BB-сжатие + цена закрылась выше BB-верх + RSI>50 + ADX растёт → confidence 60-75.
-СИГНАЛ SHORT (пробой вниз): BB-сжатие + цена закрылась ниже BB-низ + RSI<50 + ADX растёт → confidence 60-75.
-NEUTRAL: BB расширяется без чёткого направления, ADX падает → confidence<45.
+3. ATR-ОЦЕНКА: ATR={atr_pct:.1f}% — размер стопа = 1.5×ATR от входа. Стоп для текущего ATR ≈ ${atr_stop_15:.2f}.
+4. НАПРАВЛЕНИЕ ПРОБОЯ: анализируй последние свечи — куда давление? Цена у верхней BB ({bb_pos:.0f}%) → вероятный пробой вверх; у нижней → вниз.
+5. ПОДТВЕРЖДЕНИЕ ADX: ADX={adx:.1f} ({adx_strength}). При сжатии BB + рост ADX → пробой формируется. ADX>30 = сильное направленное движение (не путать с режимом {market_regime}).
+6. RSI ПРИ ПРОБОЕ: RSI>55 при пробое вверх = бычье подтверждение; RSI<45 при пробое вниз = медвежье.
+7. ЛОЖНЫЙ ПРОБОЙ: если цена вышла за BB и вернулась = ловушка. Торгуй в обратном направлении.
+СИГНАЛ LONG (пробой вверх): BB-сжатие + цена закрылась выше BB-верх + RSI>50 + направление по {ma_structure} → 60-75.
+СИГНАЛ SHORT (пробой вниз): BB-сжатие + цена закрылась ниже BB-низ + RSI<50 + направление по {ma_structure} → 60-75.
+NEUTRAL: BB расширяется без направления, или WEAK_TREND без подтверждения свечой → confidence<45.
 ЦЕНОВЫЕ УРОВНИ (только от текущей цены ${price:.2f}):
 - entry_limit_price: у границы BB или ±2% от ${price:.2f}
 - stop_loss: за противоположную BB-границу или 1.5×ATR=${atr_stop_15:.2f} от входа
@@ -674,12 +699,16 @@ NEUTRAL: BB расширяется без чёткого направления,
 {footer}"""),
 
     ("mean_reversion", """Сделай торговый прогноз для {ticker} на {forecast_date} (горизонт {horizon} дней).
-Рыночный режим: {market_regime} (ADX={adx:.1f})
+
+{regime_block}
+
+Учёт режима для метода: {regime_method_hint}
 {market_context}
 ТЕХНИЧЕСКИЕ ДАННЫЕ:
-- Цена: ${price:.2f} | MA20: ${ma20:.2f} (откл. {ma20_dev:+.1f}%) | MA50: ${ma50:.2f}
+- Цена: ${price:.2f} | MA20: ${ma20:.2f} (откл. {ma20_dev:+.1f}%) | MA50: ${ma50:.2f} | MA200: ${ma200:.2f}
+- Структура MA: {ma_structure} | Цена {price_vs_ma20}
 - RSI(14): {rsi:.1f} | Stoch RSI: {stoch_rsi:.2f} | MACD hist: {macd_hist:+.2f}
-- BB верх: ${bb_upper:.2f} | BB низ: ${bb_lower:.2f} | ATR: {atr_pct:.1f}%
+- BB верх: ${bb_upper:.2f} | BB низ: ${bb_lower:.2f} | ATR: {atr_pct:.1f}% | ADX: {adx:.1f} ({adx_strength})
 - Динамика: 5д={change_5d:+.1f}% 20д={change_20d:+.1f}%
 
 ПОСЛЕДНИЕ 5 СВЕЧЕЙ (актуальные OHLCV — искать свечи разворота):
@@ -695,12 +724,13 @@ NEUTRAL: BB расширяется без чёткого направления,
    - MACD hist={macd_hist:+.2f}: разворот → подтверждение
 3. ДИВЕРГЕНЦИЯ: цена обновила минимум, но RSI — нет = бычья дивергенция (сильный LONG-сигнал).
    Цена обновила максимум, RSI — нет = медвежья дивергенция (сильный SHORT-сигнал).
-4. ФИЛЬТР ТРЕНДА: ADX={adx:.1f}. При ADX>30 mean reversion опасен (сильный тренд). Снизь confidence до <50 или выбери NEUTRAL.
+4. ФИЛЬТР РЕЖИМА: {market_regime} — {regime_rationale}. Mean reversion оптимален при RANGING.
+   При STRONG_* или WEAK_TREND + ADX>25 — снижай confidence; при ADX>30 — предпочитай NEUTRAL; при ADX>35 — NEUTRAL.
 5. ЦЕЛЬ ВОЗВРАТА: LONG цель = MA20 (${ma20:.2f}), затем MA50 (${ma50:.2f}). SHORT цель = MA20 (${ma20:.2f}).
 6. СВЕЧИ РАЗВОРОТА: анализируй последние 3 свечи — есть ли пин-бар, молот, поглощение у уровня MA или BB?
-СИГНАЛ LONG (oversold bounce): откл.<-5% + RSI<35 + Stoch RSI<0.3 + ADX<25 → confidence 60-75.
-СИГНАЛ SHORT (overbought revert): откл.>+5% + RSI>65 + Stoch RSI>0.7 + ADX<25 → confidence 60-75.
-НЕЛЬЗЯ ТОРГОВАТЬ: ADX>35 (слишком сильный тренд для разворота) → NEUTRAL.
+СИГНАЛ LONG (oversold bounce): режим RANGING + откл.<-5% + RSI<35 + Stoch RSI<0.3 + ADX<25 → 60-75.
+СИГНАЛ SHORT (overbought revert): режим RANGING + откл.>+5% + RSI>65 + Stoch RSI>0.7 + ADX<25 → 60-75.
+НЕЛЬЗЯ ТОРГОВАТЬ: режим STRONG_* при ADX>30, или ADX>35 → NEUTRAL.
 ЦЕНОВЫЕ УРОВНИ (только от текущей цены ${price:.2f}):
 - entry_limit_price: ±2% от ${price:.2f}, с подтверждением свечного разворота
 - stop_loss: за экстремум последних 3 свечей или 1.2×ATR от входа
@@ -709,12 +739,16 @@ NEUTRAL: BB расширяется без чёткого направления,
 {footer}"""),
 
     ("volume_breakout", """Сделай торговый прогноз для {ticker} на {forecast_date} (горизонт {horizon} дней).
-Рыночный режим: {market_regime} (ADX={adx:.1f})
+
+{regime_block}
+
+Учёт режима для метода: {regime_method_hint}
 {market_context}
 ТЕХНИЧЕСКИЕ ДАННЫЕ:
 - Цена: ${price:.2f} | Объём: {volume_current} ({vol_ratio:.1f}x среднего)
-- OBV тренд: {obv_trend} | ATR: ${atr:.2f} ({atr_pct:.1f}%) | ADX: {adx:.1f}
-- MA20: ${ma20:.2f} | MA50: ${ma50:.2f} | EMA9: ${ema9:.2f} | EMA21: ${ema21:.2f}
+- OBV тренд: {obv_trend} | ATR: ${atr:.2f} ({atr_pct:.1f}%) | ADX: {adx:.1f} ({adx_strength})
+- MA20: ${ma20:.2f} | MA50: ${ma50:.2f} | MA200: ${ma200:.2f} | Структура MA: {ma_structure}
+- EMA9: ${ema9:.2f} | EMA21: ${ema21:.2f} | Цена {price_vs_ma20}
 - RSI: {rsi:.1f} | MACD hist: {macd_hist:+.2f}
 - Динамика: 5д={change_5d:+.1f}% 20д={change_20d:+.1f}%
 
@@ -722,20 +756,21 @@ NEUTRAL: BB расширяется без чёткого направления,
 {recent_candles}
 
 МЕТОД: VOLUME BREAKOUT — АЛГОРИТМ АНАЛИЗА:
-1. ОБЪЁМНЫЙ ИМПУЛЬС: текущий объём {vol_ratio:.1f}x среднего.
+1. СИСТЕМНЫЙ РЕЖИМ: {market_regime} — {regime_rationale}. При WEAK_TREND требуй vol_ratio>2.5.
+2. ОБЪЁМНЫЙ ИМПУЛЬС: текущий объём {vol_ratio:.1f}x среднего.
    - >3x = экстремальный импульс (очень высокий confidence при чётком направлении)
    - 2-3x = сильный импульс (высокий confidence)
    - 1.5-2x = умеренный импульс (средний confidence)
    - <1.5x = слабый объём, пробой ненадёжен (снизь confidence, рассмотри NEUTRAL)
-2. НАПРАВЛЕНИЕ ПРОБОЯ: OBV {obv_trend}. Цена растёт + OBV растёт = накопление (LONG). Цена падает + OBV падает = распределение (SHORT).
-3. УРОВЕНЬ ПРОБОЯ: определи ключевой уровень из последних свечей. Объём >2x при закрытии выше/ниже уровня = подтверждённый пробой.
-4. ADX-ПОДТВЕРЖДЕНИЕ: ADX={adx:.1f}. ADX растёт при объёмном пробое = усиление тренда. ADX<20 = объём без тренда (менее надёжно).
-5. RSI ПРИ ПРОБОЕ: RSI 50-65 при пробое вверх = устойчивый рост (не перекуплен); RSI 35-50 при пробое вниз = устойчивое падение.
-6. ЛОЖНЫЙ ПРОБОЙ: объём высокий, но цена вернулась в диапазон = ловушка. Торгуй в противоположную сторону с подтверждением.
-7. ЦЕЛИ ПОСЛЕ ПРОБОЯ: проекция высоты предыдущего диапазона от точки пробоя.
-СИГНАЛ LONG: vol_ratio>2 + OBV растёт + цена>MA20 + RSI 50-70 + ADX растёт → confidence 65-80.
-СИГНАЛ SHORT: vol_ratio>2 + OBV падает + цена<MA20 + RSI 30-50 + ADX растёт → confidence 65-80.
-NEUTRAL: vol_ratio<1.5 или противоречие OBV и цены → confidence<50.
+3. НАПРАВЛЕНИЕ ПРОБОЯ: OBV {obv_trend}. Цена растёт + OBV растёт = накопление (LONG). Цена падает + OBV падает = распределение (SHORT).
+4. УРОВЕНЬ ПРОБОЯ: определи ключевой уровень из последних свечей. Объём >2x при закрытии выше/ниже уровня = подтверждённый пробой.
+5. ADX-ПОДТВЕРЖДЕНИЕ: ADX={adx:.1f} ({adx_strength}). ADX растёт при объёмном пробое = усиление движения. ADX<20 = объём без тренда (менее надёжно).
+6. RSI ПРИ ПРОБОЕ: RSI 50-65 при пробое вверх = устойчивый рост (не перекуплен); RSI 35-50 при пробое вниз = устойчивое падение.
+7. ЛОЖНЫЙ ПРОБОЙ: объём высокий, но цена вернулась в диапазон = ловушка. Торгуй в противоположную сторону с подтверждением.
+8. ЦЕЛИ ПОСЛЕ ПРОБОЯ: проекция высоты предыдущего диапазона от точки пробоя.
+СИГНАЛ LONG: режим STRONG_UPTREND + vol_ratio>2 + OBV растёт + цена>MA20 + RSI 50-70 → 65-80.
+СИГНАЛ SHORT: режим STRONG_DOWNTREND + vol_ratio>2 + OBV падает + цена<MA20 + RSI 30-50 → 65-80.
+NEUTRAL: vol_ratio<1.5, RANGING без ADX-роста, или противоречие OBV и цены → confidence<50.
 ЦЕНОВЫЕ УРОВНИ (только от текущей цены ${price:.2f}):
 - entry_limit_price: у уровня пробоя ±2% от ${price:.2f} (диапазон: ${price_m2:.2f}–${price_p2:.2f})
 - stop_loss: за уровень пробоя, не более 2×ATR=${atr_stop_20:.2f} от входа
@@ -1326,6 +1361,14 @@ class SQLiteManager(_SQLiteManagerQueriesMixin):
             ("consensus", "market_regime",            "TEXT DEFAULT ''"),
             ("consensus", "mae_pct",                  "REAL"),
             ("consensus", "mfe_pct",                  "REAL"),
+            # Meta-labeling
+            ("consensus", "net_pnl_pct",              "REAL"),
+            ("consensus", "costs_pct",                "REAL"),
+            ("consensus", "label_meta",               "INTEGER"),
+            ("consensus", "meta_score",               "REAL"),
+            ("consensus", "meta_decision",            "TEXT DEFAULT ''"),
+            ("consensus", "meta_model_version",       "TEXT DEFAULT ''"),
+            ("consensus", "meta_features_json",       "TEXT DEFAULT ''"),
             # Test marker fields
             ("orders",    "trade_uid",         "TEXT DEFAULT NULL"),
             ("orders",    "ib_perm_id",        "INTEGER DEFAULT 0"),
@@ -1665,6 +1708,17 @@ class SQLiteManager(_SQLiteManagerQueriesMixin):
             ("SKIP_FORECAST_WHEN_EXPOSED",   "true",   "Skip LLM forecasts when ticker has open order or position"),
             ("FORECAST_TTL_MINUTES",         "240",    "Signal TTL in minutes — PENDING_ORDER older than this becomes EXPIRED"),
             ("PENDING_ORDERS_INTERVAL_MINUTES","1",   "How often to process PENDING_ORDER consensus (minutes)"),
+            # Meta-labeling
+            ("META_LABEL_ENABLED",           "false",  "Enable meta-label ML inference stage"),
+            ("META_LABEL_ENFORCE",           "false",  "Block orders when meta rejects (false=shadow)"),
+            ("META_LABEL_THRESHOLD",         "0.55",   "Min P(profitable) to pass meta gate"),
+            ("META_MODEL_PATH",              "",       "Path to meta-label joblib model"),
+            ("META_MODEL_VERSION",           "",       "Meta model version string for audit"),
+            ("META_LABEL_MIN_EDGE_PCT",      "0.05",   "Min net PnL % for label_meta=1"),
+            ("META_DATASET_MODE",            "false",  "Collect forecasts even when ticker has exposure"),
+            ("BYBIT_TAKER_FEE_PCT",          "0.055",  "Bybit taker fee % (one side)"),
+            ("BYBIT_MAKER_FEE_PCT",          "0.02",   "Bybit maker fee % (one side)"),
+            ("META_LABEL_ASSUME_TAKER",      "true",   "Use taker fee for net PnL estimate"),
         ]
         con.executemany(
             "INSERT OR IGNORE INTO config(key, value, description) VALUES (?,?,?)",
@@ -1740,6 +1794,7 @@ class SQLiteManager(_SQLiteManagerQueriesMixin):
                 migrate_price_data_table,
                 migrate_heartbeat_log,
                 create_bybit_transactions_table,
+                create_bybit_uta_transaction_log_table,
                 create_bybit_gateway_log_table,
                 add_bybit_config_defaults,
             )
@@ -1749,11 +1804,39 @@ class SQLiteManager(_SQLiteManagerQueriesMixin):
             migrate_price_data_table(con)
             migrate_heartbeat_log(con)
             create_bybit_transactions_table(con)
+            create_bybit_uta_transaction_log_table(con)
             create_bybit_gateway_log_table(con)
             add_bybit_config_defaults(con)
             con.commit()
         except Exception as e:
             logger.warning(f"Schema migration: Bybit schema skipped: {e}")
+
+        self._ensure_meta_label_tables(con)
+
+    @staticmethod
+    def _ensure_meta_label_tables(con: sqlite3.Connection) -> None:
+        """Meta-labeling auxiliary tables."""
+        try:
+            con.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS perp_market_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    consensus_id INTEGER,
+                    ticker TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    funding_rate REAL,
+                    mark_price REAL,
+                    index_price REAL,
+                    mark_index_premium_bps REAL,
+                    volume_24h REAL
+                );
+                CREATE INDEX IF NOT EXISTS idx_perp_snap_consensus
+                    ON perp_market_snapshots(consensus_id);
+                """
+            )
+            con.commit()
+        except Exception as e:
+            logger.warning(f"Schema migration: meta-label tables skipped: {e}")
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.db_file, timeout=30)

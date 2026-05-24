@@ -28,13 +28,22 @@ from PyQt6.QtGui import QColor, QFont, QBrush
 from scripts.shared.models import ForecastLog, TickerSetting, ProviderSetting, PositionRecord, AccountRecord, ConsensusRecord
 from scripts.client.api_client import ForecastApiClient
 from scripts.client.tabs.add_ticker_dialog import AddTickerDialog
+from scripts.client.tabs.status_poller import StatusPoller
 
 class TickersTab(QWidget):
+    _TICKER_COL = 1
+    _RUN_COL = 2
+    _PORTFOLIO_COL = 3
+    _COMMENT_COL = 4
+
     def __init__(self, api: ForecastApiClient, parent=None):
         super().__init__(parent)
         self.api = api
         self._tickers: List[TickerSetting] = []
         self._positions: List[PositionRecord] = []
+        self._poller: Optional[StatusPoller] = None
+        self._running_ticker: Optional[str] = None
+        self._run_completion_pending = False
         self._build_ui()
 
     def _build_ui(self):
@@ -54,11 +63,12 @@ class TickersTab(QWidget):
         layout.addLayout(btn_row)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Active", "Ticker", "Portfolio", "Comment"])
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Active", "Ticker", "Run Forecasts", "Portfolio", "Comment"])
+        self.table.horizontalHeader().setSectionResizeMode(self._TICKER_COL, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(self._RUN_COL, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(self._PORTFOLIO_COL, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(self._COMMENT_COL, QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         layout.addWidget(self.table, 1)
 
@@ -87,7 +97,12 @@ class TickersTab(QWidget):
 
             ticker_item = QTableWidgetItem(str(t.ticker or ""))
             ticker_item.setFlags(ticker_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(row_idx, 1, ticker_item)
+            self.table.setItem(row_idx, self._TICKER_COL, ticker_item)
+
+            run_btn = QPushButton("▶ Run")
+            run_btn.setToolTip(f"Generate forecasts and consensus for {t.ticker}")
+            run_btn.clicked.connect(lambda _=False, tk=t.ticker: self._run_forecasts(tk))
+            self.table.setCellWidget(row_idx, self._RUN_COL, run_btn)
 
             # Portfolio indicator: Yes if position exists with non-zero quantity
             position_qty = sum(
@@ -98,10 +113,70 @@ class TickersTab(QWidget):
             portfolio_item = QTableWidgetItem(portfolio_text)
             portfolio_item.setFlags(portfolio_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             portfolio_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row_idx, 2, portfolio_item)
+            self.table.setItem(row_idx, self._PORTFOLIO_COL, portfolio_item)
 
             comment_item = QTableWidgetItem(str(t.comment or ""))
-            self.table.setItem(row_idx, 3, comment_item)
+            self.table.setItem(row_idx, self._COMMENT_COL, comment_item)
+
+    def _set_run_buttons_enabled(self, enabled: bool):
+        for row in range(self.table.rowCount()):
+            btn = self.table.cellWidget(row, self._RUN_COL)
+            if isinstance(btn, QPushButton):
+                btn.setEnabled(enabled)
+
+    def _run_forecasts(self, ticker: str):
+        reply = QMessageBox.question(
+            self,
+            "Run Forecasts",
+            f"Run forecast generation and consensus for {ticker}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.api.run_forecast_ticker(ticker)
+            self._running_ticker = ticker
+            self._run_completion_pending = True
+            self._set_run_buttons_enabled(False)
+            self._start_polling()
+        except Exception as e:
+            err = str(e)
+            if "409" in err or "already running" in err.lower():
+                QMessageBox.warning(self, "Busy", "Another forecast run is already in progress.")
+            else:
+                QMessageBox.critical(self, "Error", f"Failed to start forecast for {ticker}:\n{e}")
+
+    def _start_polling(self):
+        if self._poller and self._poller.isRunning():
+            self._poller.stop()
+        self._poller = StatusPoller(self.api)
+        self._poller.finished.connect(self._on_run_finished)
+        self._poller.start()
+
+    def _on_run_finished(self):
+        if not self._run_completion_pending:
+            return
+        self._run_completion_pending = False
+        self._set_run_buttons_enabled(True)
+        ticker = self._running_ticker
+        self._running_ticker = None
+        try:
+            resp = self.api.run_status()
+            if resp.status == "done":
+                QMessageBox.information(
+                    self,
+                    "Complete",
+                    f"Forecast run for {ticker} completed successfully.",
+                )
+            elif resp.status == "error":
+                QMessageBox.warning(
+                    self,
+                    "Error",
+                    f"Forecast run for {ticker} failed:\n{resp.message or 'Unknown error'}",
+                )
+        except Exception:
+            pass
 
     def _get_checkbox(self, row: int) -> Optional[QCheckBox]:
         w = self.table.cellWidget(row, 0)
@@ -132,7 +207,7 @@ class TickersTab(QWidget):
             try:
                 cb = self._get_checkbox(row_idx)
                 active = 1 if (cb and cb.isChecked()) else 0
-                comment_item = self.table.item(row_idx, 3)
+                comment_item = self.table.item(row_idx, self._COMMENT_COL)
                 comment = comment_item.text() if comment_item else ""
                 self.api.update_ticker(t.ticker, active=active, comment=comment)
             except Exception as e:

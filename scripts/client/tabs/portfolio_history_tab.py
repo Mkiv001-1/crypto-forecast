@@ -45,13 +45,39 @@ def _pnl_color(value: float) -> QColor:
     return QColor("#263238")
 
 
+def _format_num(value: Any, *, decimals: int = 4) -> str:
+    f = _as_float(value)
+    if value in (None, "", "--"):
+        return "--"
+    text = f"{f:,.{decimals}f}".rstrip("0").rstrip(".")
+    return text if text else "0"
+
+
+def _format_type_label(trans_type: str) -> str:
+    t = (trans_type or "").strip().upper()
+    if not t:
+        return "--"
+    return t.replace("_", " ").title()
+
+
+def _direction_color(direction: str) -> QColor:
+    d = (direction or "").lower()
+    if "sell" in d:
+        return QColor("#c62828")
+    if "buy" in d:
+        return QColor("#2e7d32")
+    return QColor("#263238")
+
+
 class PortfolioHistoryTab(QWidget):
     def __init__(self, api: ForecastApiClient, parent=None):
         super().__init__(parent)
         self.api = api
         self._position_rows: List[dict] = []
         self._transaction_rows: List[dict] = []
+        self._uta_transaction_rows: List[dict] = []
         self._transactions_loaded = False
+        self._uta_transactions_loaded = False
         self._build_ui()
 
     def _build_ui(self):
@@ -86,13 +112,15 @@ class PortfolioHistoryTab(QWidget):
         filter_row.addStretch()
         layout.addLayout(filter_row)
 
-        history_label = QLabel("Portfolio History Logs")
+        history_label = QLabel("Portfolio Logs")
         history_label.setStyleSheet("font-weight: bold; color: #455a64; margin-top: 4px;")
         layout.addWidget(history_label)
 
         self.history_tabs = QTabWidget()
+        self.uta_transaction_table = self._create_uta_transaction_table()
         self.transaction_table = self._create_transaction_table()
         self.position_table = self._create_position_table()
+        self.history_tabs.addTab(self.uta_transaction_table, "Transactions")
         self.history_tabs.addTab(self.transaction_table, "Transaction Log")
         self.history_tabs.addTab(self.position_table, "Position history (legacy)")
         self.history_tabs.currentChanged.connect(self._on_history_sub_tab_changed)
@@ -109,6 +137,20 @@ class PortfolioHistoryTab(QWidget):
         ])
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeMode.Stretch)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSortingEnabled(True)
+        return table
+
+    def _create_uta_transaction_table(self) -> QTableWidget:
+        table = QTableWidget(0, 13)
+        table.setHorizontalHeaderLabels([
+            "Time", "Currency", "Contract", "Type", "Direction",
+            "Quantity", "Position", "Filled Price", "Funding",
+            "Fee Paid", "Cash Flow", "Change", "Wallet Balance",
+        ])
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(12, QHeaderView.ResizeMode.Stretch)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSortingEnabled(True)
@@ -203,12 +245,24 @@ class PortfolioHistoryTab(QWidget):
         self.refresh_btn.setEnabled(False)
         self.refresh_btn.setText("Refreshing…")
 
+        date_from = self.from_date.date().toString("yyyy-MM-dd")
+        date_to = self.to_date.date().toString("yyyy-MM-dd")
+
         def task(log: Callable[[str, str], None]) -> dict:
             log("INFO", "Syncing Unified Trading account from Bybit…")
-            result = self.api.trigger_portfolio_history_snapshot()
+            result = self.api.trigger_portfolio_history_snapshot(
+                date_from=date_from,
+                date_to=date_to,
+            )
             added = int(result.get("snapshots_added", 0) or 0) if isinstance(result, dict) else 0
             equity = _as_float(result.get("total_equity")) if isinstance(result, dict) else 0
-            log("INFO", f"Sync complete ({added} snapshot row(s), equity ${equity:,.2f}).")
+            tx = result.get("transaction_log") if isinstance(result, dict) else {}
+            tx_synced = int((tx or {}).get("synced", 0) or 0)
+            log(
+                "INFO",
+                f"Sync complete ({added} snapshot row(s), {tx_synced} transaction log row(s), "
+                f"equity ${equity:,.2f}).",
+            )
             return result
 
         def on_success(_result: dict):
@@ -224,8 +278,8 @@ class PortfolioHistoryTab(QWidget):
         try:
             _window_run_activity(
                 self,
-                operation_id="portfolio_history.refresh",
-                title="Portfolio History",
+                operation_id="portfolio.refresh",
+                title="Portfolio",
                 task=task,
                 on_success=on_success,
                 on_error=on_error,
@@ -236,9 +290,29 @@ class PortfolioHistoryTab(QWidget):
             QMessageBox.critical(self, "Error", str(e))
 
     def _on_history_sub_tab_changed(self, index: int) -> None:
-        if index == 0 and not self._transactions_loaded:
+        if index == 0 and not self._uta_transactions_loaded:
+            self._load_uta_transactions()
+        elif index == 1 and not self._transactions_loaded:
             self._load_transactions()
         self._update_total_label()
+
+    def _load_uta_transactions(self) -> None:
+        symbol = self.ticker_combo.currentData() or None
+        date_from = self.from_date.date().toString("yyyy-MM-dd")
+        date_to = self.to_date.date().toString("yyyy-MM-dd")
+        try:
+            resp = self.api.get_portfolio_transaction_log(
+                symbol=symbol or None,
+                date_from=date_from,
+                date_to=date_to,
+                limit=5000,
+            )
+            items = resp.get("items", []) if isinstance(resp, dict) else []
+            self._uta_transaction_rows = items if isinstance(items, list) else []
+            self._uta_transactions_loaded = True
+            self._populate_uta_transaction_table()
+        except Exception as e:
+            logger.warning("portfolio UTA transactions load failed: %s", e)
 
     def _load_transactions(self) -> None:
         ticker = self.ticker_combo.currentData() or None
@@ -268,6 +342,7 @@ class PortfolioHistoryTab(QWidget):
             date_from = self.from_date.date().toString("yyyy-MM-dd")
             date_to = self.to_date.date().toString("yyyy-MM-dd")
             self._transactions_loaded = False
+            self._uta_transactions_loaded = False
             resp = self.api.get_portfolio_history(
                 ticker=ticker, date_from=date_from, date_to=date_to
             )
@@ -275,6 +350,7 @@ class PortfolioHistoryTab(QWidget):
             self._populate_position_table()
             self._refresh_ticker_filter()
             self._update_unified_summary(live=False)
+            self._load_uta_transactions()
             self._load_transactions()
             self._update_total_label()
         except Exception as e:
@@ -412,6 +488,48 @@ class PortfolioHistoryTab(QWidget):
                 self.transaction_table.setItem(r, c, item)
         self.transaction_table.setSortingEnabled(True)
 
+    def _populate_uta_transaction_table(self):
+        self.uta_transaction_table.setSortingEnabled(False)
+        self.uta_transaction_table.setRowCount(0)
+        for r, row in enumerate(self._uta_transaction_rows):
+            symbol = str(row.get("symbol") or "").strip()
+            contract = symbol if symbol else "--"
+            direction = str(row.get("direction") or "--")
+            time_text = str(row.get("transaction_time", ""))[:19].replace("T", " ")
+            currency = str(row.get("currency") or "")
+            fee_text = _format_num(row.get("fee"), decimals=8)
+            if currency and fee_text != "--":
+                fee_text = f"{fee_text} {currency}"
+
+            values = [
+                time_text,
+                currency or "--",
+                contract,
+                _format_type_label(str(row.get("type") or "")),
+                direction,
+                _format_num(row.get("qty")),
+                _format_num(row.get("size")),
+                _format_num(row.get("trade_price"), decimals=8),
+                _format_num(row.get("funding"), decimals=8),
+                fee_text,
+                _format_num(row.get("cash_flow"), decimals=4),
+                _format_num(row.get("change"), decimals=4),
+                _format_num(row.get("cash_balance"), decimals=8),
+            ]
+            self.uta_transaction_table.insertRow(r)
+            for c, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if c == 4:
+                    item.setForeground(QBrush(_direction_color(direction)))
+                if c in (9, 10, 11):
+                    num = _as_float(
+                        row.get("fee") if c == 9 else row.get("cash_flow") if c == 10 else row.get("change")
+                    )
+                    if num != 0:
+                        item.setForeground(QBrush(_pnl_color(num)))
+                self.uta_transaction_table.setItem(r, c, item)
+        self.uta_transaction_table.setSortingEnabled(True)
+
     def _filter_transaction_rows_by_date(
         self,
         rows: List[dict],
@@ -435,16 +553,25 @@ class PortfolioHistoryTab(QWidget):
     def _update_total_label(self):
         tab_idx = self.history_tabs.currentIndex() if hasattr(self, "history_tabs") else 0
         if tab_idx == 0:
-            self.total_label.setText(f"Transaction rows: {len(self._transaction_rows)}")
+            self.total_label.setText(
+                f"Transaction log rows: {len(self._uta_transaction_rows)}"
+            )
+        elif tab_idx == 1:
+            self.total_label.setText(f"Audit rows: {len(self._transaction_rows)}")
         else:
             self.total_label.setText(f"Position rows: {len(self._position_rows)}")
 
     def _refresh_ticker_filter(self):
+        uta_symbols = {
+            str(row.get("symbol", ""))
+            for row in self._uta_transaction_rows
+            if row.get("symbol")
+        }
         tickers = sorted({
             str(row.get("ticker", ""))
             for row in (self._position_rows + self._transaction_rows)
             if row.get("ticker")
-        })
+        } | uta_symbols)
         current = self.ticker_combo.currentData()
         self.ticker_combo.blockSignals(True)
         self.ticker_combo.clear()

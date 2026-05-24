@@ -240,6 +240,30 @@ async def run_forecast():
     return RunResponse(status="running", message="Forecast started", started_at=deps.get_runner().started_at)
 
 
+@router.post("/run/forecast/{ticker}", response_model=RunResponse, dependencies=[Depends(verify_api_key)])
+async def run_forecast_ticker(ticker: str):
+    ticker = ticker.strip().upper()
+    if not ticker:
+        raise HTTPException(status_code=400, detail="Ticker is required")
+    try:
+        em = _get_db_manager()
+        df = em.read_sheet("Settings")
+        if df.empty or ticker not in df["ticker"].astype(str).str.upper().values:
+            raise HTTPException(status_code=404, detail=f"Ticker {ticker} not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error validating ticker for forecast run")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not deps.get_runner().start(f"forecast_ticker:{ticker}"):
+        raise HTTPException(status_code=409, detail="Robot is already running")
+    return RunResponse(
+        status="running",
+        message=f"Forecast started for {ticker}",
+        started_at=deps.get_runner().started_at,
+    )
+
+
 @router.post("/run/evaluate", response_model=RunResponse, dependencies=[Depends(verify_api_key)])
 async def run_evaluate():
     if not deps.get_runner().start("evaluate"):
@@ -917,6 +941,78 @@ async def get_portfolio_history(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/portfolio/transaction-log", dependencies=[Depends(verify_api_key)])
+async def get_portfolio_transaction_log(
+    currency: Optional[str] = Query(None),
+    symbol: Optional[str] = Query(None),
+    trans_type: Optional[str] = Query(None, alias="type"),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    limit: int = Query(500, ge=1, le=5000),
+):
+    """Return Bybit UTA transaction log rows from local DB."""
+    try:
+        em = _get_db_manager()
+        clauses = []
+        params: list = []
+        if currency:
+            clauses.append("UPPER(currency)=UPPER(?)")
+            params.append(currency)
+        if symbol:
+            clauses.append("UPPER(symbol)=UPPER(?)")
+            params.append(symbol)
+        if trans_type:
+            clauses.append("UPPER(type)=UPPER(?)")
+            params.append(trans_type)
+        if date_from:
+            clauses.append("transaction_time>=?")
+            params.append(date_from)
+        if date_to:
+            clauses.append("transaction_time<=?")
+            params.append(date_to + "T23:59:59")
+        where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        with em._connect() as con:
+            rows = con.execute(
+                f"SELECT * FROM bybit_uta_transaction_log{where_sql} "
+                f"ORDER BY transaction_time DESC LIMIT ?",
+                params,
+            ).fetchall()
+        items = [dict(r) for r in rows]
+        synced_at = em.get_config_value("LAST_BYBIT_TRANSACTION_LOG_SYNC_AT", "") or ""
+        return {"items": items, "total": len(items), "synced_at": synced_at}
+    except Exception as e:
+        logger.exception("Error fetching portfolio transaction log")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.post("/portfolio/transaction-log/sync", dependencies=[Depends(verify_api_key)])
+async def sync_portfolio_transaction_log(
+    currency: Optional[str] = Query(None),
+    trans_type: Optional[str] = Query(None, alias="type"),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+):
+    """Pull Bybit UTA transaction log into local DB."""
+    try:
+        from scripts.core.bybit_transaction_log_sync import sync_bybit_transaction_log
+        from scripts.server.async_blocking import run_blocking
+
+        em = _get_db_manager()
+        result = await run_blocking(
+            sync_bybit_transaction_log,
+            em,
+            date_from=date_from,
+            date_to=date_to,
+            currency=currency,
+            trans_type=trans_type,
+        )
+        return result
+    except Exception as e:
+        logger.exception("Error syncing portfolio transaction log")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 @router.post("/portfolio/sync", dependencies=[Depends(verify_api_key)])
 async def sync_portfolio():
     """Trigger an immediate portfolio sync from Bybit and update the Portfolio table."""
@@ -936,7 +1032,9 @@ async def sync_portfolio():
 
 
 @router.post("/portfolio/history/snapshot", dependencies=[Depends(verify_api_key)])
-async def trigger_portfolio_history_snapshot():
+async def trigger_portfolio_history_snapshot(
+    body: Optional[dict] = Body(default=None),
+):
     """Принудительно собрать snapshot портфеля через Bybit API."""
     try:
         from scripts.core.bybit_unified_wallet import (
@@ -944,6 +1042,8 @@ async def trigger_portfolio_history_snapshot():
             sync_unified_wallet_snapshot,
         )
         from scripts.core.bybit_account_sync import sync_account_data_async
+        from scripts.core.bybit_transaction_log_sync import sync_bybit_transaction_log
+        from scripts.server.async_blocking import run_blocking
 
         em = _get_db_manager()
         account = await sync_account_data_async(em)
@@ -954,9 +1054,24 @@ async def trigger_portfolio_history_snapshot():
         wallet, inserted = sync_unified_wallet_snapshot(
             em, positions_count=positions_count, wallet=wallet
         )
+
+        payload = body or {}
+        tx_result = await run_blocking(
+            sync_bybit_transaction_log,
+            em,
+            date_from=payload.get("date_from"),
+            date_to=payload.get("date_to"),
+            currency=payload.get("currency"),
+            trans_type=payload.get("type"),
+        )
+
+        response: dict = {
+            "snapshots_added": inserted if wallet else 0,
+            "transaction_log": tx_result,
+        }
         if wallet:
-            return {"snapshots_added": inserted, "total_equity": wallet.get("total_equity", 0)}
-        return {"snapshots_added": 0}
+            response["total_equity"] = wallet.get("total_equity", 0)
+        return response
     except Exception as e:
         logger.exception("Error triggering portfolio history snapshot")
         raise HTTPException(status_code=500, detail=str(e))

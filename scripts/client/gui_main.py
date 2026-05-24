@@ -126,8 +126,8 @@ class MainWindow(QMainWindow):
         self.indicators_tab = IndicatorsTab(self.api)
         self.tabs.addTab(self.indicators_tab, "📈 Indicators")
 
-        self.portfolio_history_tab = PortfolioHistoryTab(self.api)
-        self.tabs.addTab(self.portfolio_history_tab, "📊 Portfolio History")
+        self.portfolio_tab = PortfolioHistoryTab(self.api)
+        self.tabs.addTab(self.portfolio_tab, "📊 Portfolio")
 
         self.trading_tab = TradingTab(self.api)
         self.tabs.addTab(self.trading_tab, "💱 Trading")
@@ -214,13 +214,13 @@ class MainWindow(QMainWindow):
             return
 
         widget = self.tabs.widget(index)
-        if widget is self.portfolio_history_tab:
+        if widget is self.portfolio_tab:
             self._lazy_loaded_tabs.add(index)
-            self.info_label.setText("Loading Portfolio History…")
+            self.info_label.setText("Loading Portfolio…")
             try:
-                self.portfolio_history_tab.load()
+                self.portfolio_tab.load()
             except Exception as e:
-                logger.warning("Portfolio history tab load failed: %s", e)
+                logger.warning("Portfolio tab load failed: %s", e)
             finally:
                 self.info_label.setText("Ready")
         elif widget is self.syslog_tab:

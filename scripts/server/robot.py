@@ -77,14 +77,27 @@ class RobotRunner:
                     _sys.modules.pop(_mod, None)
 
             from scripts.core.sqlite_manager import SQLiteManager
-            from scripts.core.forecast_runner import run_trading_bot, evaluate_past_forecasts, evaluate_logs_records
+            from scripts.core.forecast_runner import (
+                run_trading_bot,
+                evaluate_past_forecasts,
+                evaluate_logs_records,
+                run_single_ticker_forecast,
+            )
 
             self._add_log(f"[{datetime.now().strftime('%H:%M:%S')}] Starting mode: {mode}")
             self._add_log(f"[{datetime.now().strftime('%H:%M:%S')}] DB: {self.db_file}")
 
             db_manager = SQLiteManager(self.db_file)
 
-            if mode == "forecast":
+            if mode.startswith("forecast_ticker:"):
+                ticker = mode.split(":", 1)[1].upper()
+                self._add_log(f"[{datetime.now().strftime('%H:%M:%S')}] Running forecast for {ticker}...")
+                run_id = run_single_ticker_forecast(ticker, db_manager=db_manager)
+                self._add_log(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] Forecast for {ticker} complete (run #{run_id})."
+                )
+
+            elif mode == "forecast":
                 self._add_log(f"[{datetime.now().strftime('%H:%M:%S')}] Running forecast generation...")
                 run_trading_bot(db_file=self.db_file)
                 self._add_log(f"[{datetime.now().strftime('%H:%M:%S')}] Forecast generation complete.")

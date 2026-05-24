@@ -285,7 +285,8 @@ Trading robot generating forecasts using AI models via OpenRouter, with executio
 |-------|---------|
 | `accounts` | Bybit accounts (broker, account_id, wallet_balance, available_balance, margin_balance, type: demo/live) |
 | `portfolio` | Bybit positions (ticker, quantity, avg_cost, market_value, unrealized_pnl, leverage, symbol) |
-| `bybit_order_transactions` | Bybit order transaction log (trade_uid, bybit_order_id, status) |
+| `bybit_order_transactions` | Bot audit log (order status changes, portfolio snapshots) |
+| `bybit_uta_transaction_log` | Bybit UTA exchange transaction log (synced via `/v5/account/transaction-log`) |
 | `bybit_gateway_log` | Bybit API operation log |
 
 ### 5.3 Orders & Trades Tables
@@ -346,6 +347,23 @@ Scheduler (`scheduler.py`) manages 14 periodic tasks:
 
 ## 7. Forecast Pipeline
 
+Per-ticker processing is delegated to `scripts/core/pipeline/stages.py` via thin `forecast_runner.process_ticker()`.
+
+### 7.0 Pipeline Stages (default order)
+
+| Stage | Module | Purpose |
+|-------|--------|---------|
+| `FetchDataStage` | `bybit_data_loader` | Load 250d OHLCV, staleness check |
+| `IndicatorStage` | `indicators` | Technical indicators |
+| `RegimeStage` | `market_regime` | Regime + active methods |
+| `TradingExposureGuardStage` | `trading_exposure` | Skip LLM if open order/position (`SKIP_FORECAST_WHEN_EXPOSED`) |
+| `ForecastStage` | `multi_model_forecaster` | LLM forecasts → `logs` |
+| `ConsensusStage` | `consensus` | Weighted aggregation → `consensus` |
+| `MetaLabelStage` | `meta_label.stage` | ML gate before orders (optional, `META_LABEL_ENABLED`) |
+| `OrderActivationStage` | `bybit_order_manager` | Auto submit if `AUTO_ORDER_SUBMISSION` |
+
+See also: [META_LABELING.md](META_LABELING.md).
+
 ### 7.1 Multi-Model Execution
 
 ```python
@@ -400,7 +418,7 @@ After `horizon_hours`:
 - Check `target_hit`: High >= target (LONG) or Low <= target (SHORT)
 - Check `stop_hit`: Low <= stop (LONG) or High >= stop (SHORT)
 - **Stop Priority:** If both hit same day → stop wins (conservative)
-- Calculate: `pnl_pct`, `r_multiple`, `direction_correct`
+- Calculate: `pnl_pct` (gross), `net_pnl_pct` (after fees/funding), `label_meta`, `r_multiple`, `direction_correct`
 - Update `consensus` evaluation fields
 
 ---
@@ -543,7 +561,7 @@ See [BYBIT_SETUP.md](BYBIT_SETUP.md) for key creation and `BYBIT_DEMO`.
 | **Trades** | `GET /trades` |
 | **Capital** | `GET /capital` |
 | **Accounts** | `GET /accounts`, `POST /accounts/sync` |
-| **Portfolio** | `GET /portfolio`, `POST /portfolio/sync`, `POST /portfolio/history/snapshot` |
+| **Portfolio** | `GET /portfolio`, `POST /portfolio/sync`, `POST /portfolio/history/snapshot`, `GET /portfolio/transaction-log`, `POST /portfolio/transaction-log/sync` |
 | **Bybit** | `GET /bybit-credentials`, `PUT /bybit-credentials`, `GET /bybit-log`, `GET /bybit-transactions` |
 | **Forecast Runs** | `GET /forecast-runs`, `GET /forecast-runs/{id}` |
 | **Scheduler** | `GET /scheduler/status`, `GET /scheduler/tasks`, `PATCH /scheduler/tasks/{name}/active` |
@@ -772,7 +790,6 @@ move trading_robot.db trading_robot.db.corrupted.$(Get-Date -Format yyyyMMdd)
 
 | Item | Description | Priority |
 |------|-------------|----------|
-| **God Object** | `forecast_runner.py` ~120 lines in `process_ticker()` — needs pipeline decomposition | High |
 | **sys.path duplication** | Identical bootstrap blocks in multiple files — needs `bootstrap.py` | Medium |
 | **Ad-hoc SQL** | Direct SQL in `forecast_runner.py` and `scheduler.py` — should use `sqlite_manager.py` | Medium |
 | **robot.py / forecast_runner.py split** | Thin wrapper — could merge or clarify responsibilities | Low |
@@ -786,6 +803,8 @@ move trading_robot.db trading_robot.db.corrupted.$(Get-Date -Format yyyyMMdd)
 | 2026-05-06 | Google Sheets (`gspread`) removed | ✅ Done |
 | 2026-05-07 | `main_excel.py` removed | ✅ Done |
 | 2026-05-07 | Files reorganized (tests in `scripts/tests/`, docs in `docs/`) | ✅ Done |
+| 2026-05-24 | Pipeline decomposition (`scripts/core/pipeline/`, thin `process_ticker`) | ✅ Done |
+| 2026-05-24 | Meta-labeling (net PnL labels, optional ML gate) | ✅ In progress — see [META_LABELING.md](META_LABELING.md) |
 
 ---
 
@@ -794,6 +813,10 @@ move trading_robot.db trading_robot.db.corrupted.$(Get-Date -Format yyyyMMdd)
 ### 17.1 This Document
 
 `docs/PROJECT_DOCUMENTATION.md` — current consolidated technical documentation.
+
+`docs/META_LABELING.md` — meta-labeling (ML filter, net PnL labels, training).
+
+`docs/NEWS_FADE_PLAN.md` — план модуля news intelligence и fade-the-reaction (не реализован).
 
 ### 17.2 Archive (Historical Documents)
 

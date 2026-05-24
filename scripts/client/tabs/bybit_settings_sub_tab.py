@@ -295,7 +295,13 @@ _VARIABLES_HELP = """\
   {ticker}          — тикер (BTCUSDT)
   {forecast_date}   — дата прогноза
   {horizon}         — горизонт в днях
-  {market_regime}   — рыночный режим
+  {market_regime}   — рыночный режим (системная классификация)
+  {regime_block}    — полный блок режима (режим + ADX + MA + глоссарий)
+  {regime_rationale}— почему выбран этот режим
+  {regime_method_hint} — подсказка метода с учётом режима
+  {adx_strength}    — сила движения по ADX (отдельно от режима)
+  {ma_structure}    — бычий/медвежий/смешанный стек MA
+  {price_vs_ma20}   — «выше MA20» / «ниже MA20»
   {market_context}  — crypto-контекст (BTC/ETH, funding)
   {history}         — история метода (win rate, PnL)
   {footer}          — инструкция формата JSON (вставлять в конец)

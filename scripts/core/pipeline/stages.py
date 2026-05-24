@@ -143,6 +143,8 @@ class OrderActivationStage:
     def run(self, ctx: PipelineContext) -> None:
         if not ctx.consensus or not ctx.has_consensus:
             return
+        if getattr(ctx, "meta_order_blocked", False):
+            return
 
         auto_order = (
             ctx.db_manager.get_config_value("AUTO_ORDER_SUBMISSION", "false").lower() == "true"
@@ -167,6 +169,7 @@ class OrderActivationStage:
 
 
 def build_default_pipeline() -> "ForecastPipeline":
+    from scripts.core.meta_label.stage import MetaLabelStage
     from scripts.core.pipeline.base import ForecastPipeline
 
     return ForecastPipeline(
@@ -177,6 +180,7 @@ def build_default_pipeline() -> "ForecastPipeline":
             TradingExposureGuardStage(),
             ForecastStage(),
             ConsensusStage(),
+            MetaLabelStage(),
             OrderActivationStage(),
         ]
     )

@@ -16,8 +16,41 @@ from typing import Optional, Tuple
 import pandas as pd
 
 from scripts.core.mae_mfe import compute_mae_mfe_pct
+from scripts.core.meta_label.net_pnl import (
+    compute_label_meta,
+    compute_net_pnl_pct,
+    load_cost_config,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _cost_fields_for_eval(
+    db_manager,
+    *,
+    gross_pnl_pct: float,
+    signal: str,
+    horizon_hours: Optional[int],
+    funding_rate_pct: float = 0.0,
+) -> dict:
+    """Net PnL, costs, and label_meta for consensus row."""
+    cfg = load_cost_config(db_manager)
+    h = int(horizon_hours) if horizon_hours else 24
+    net_pnl, costs = compute_net_pnl_pct(
+        gross_pnl_pct,
+        signal=signal,
+        horizon_hours=h,
+        funding_rate_pct=funding_rate_pct,
+        assume_taker=cfg["assume_taker"],
+        taker_fee_pct=cfg["taker_fee_pct"],
+        maker_fee_pct=cfg["maker_fee_pct"],
+    )
+    label = compute_label_meta(net_pnl, min_edge_pct=cfg["min_edge_pct"])
+    return {
+        "net_pnl_pct": net_pnl,
+        "costs_pct": costs,
+        "label_meta": label,
+    }
 
 
 def _to_float(val) -> Optional[float]:
@@ -272,6 +305,12 @@ def _evaluate_one_intraday(
 
     r_multiple = _compute_r_multiple(pnl_pct, entry, stop_loss, signal) if stop_loss else None
     mae_pct, mfe_pct = _mae_mfe_for_eval(signal, entry, actual_high, actual_low)
+    cost_fields = _cost_fields_for_eval(
+        db_manager,
+        gross_pnl_pct=pnl_pct,
+        signal=signal,
+        horizon_hours=horizon_hours,
+    )
 
     _save_eval(
         db_manager=db_manager,
@@ -292,11 +331,13 @@ def _evaluate_one_intraday(
         r_multiple=r_multiple,
         mae_pct=mae_pct,
         mfe_pct=mfe_pct,
+        **cost_fields,
     )
     logger.info(
         f"consensus_evaluator: [intraday] id={rec_id} {ticker} {signal} → "
         f"dir={direction_correct} target_hit={target_hit} stop_hit={stop_hit} "
-        f"first_hit={first_hit} pnl={pnl_pct:.2f}% MAE={mae_pct} MFE={mfe_pct} R={r_multiple}"
+        f"first_hit={first_hit} pnl={pnl_pct:.2f}% net={cost_fields.get('net_pnl_pct')}% "
+        f"MAE={mae_pct} MFE={mfe_pct} R={r_multiple}"
     )
     return "EVALUATED"
 
@@ -514,6 +555,12 @@ def _evaluate_one(
 
     r_multiple = _compute_r_multiple(pnl_pct, entry, stop_loss, signal) if stop_loss else None
     mae_pct, mfe_pct = _mae_mfe_for_eval(signal, entry, actual_high, actual_low)
+    cost_fields = _cost_fields_for_eval(
+        db_manager,
+        gross_pnl_pct=pnl_pct,
+        signal=signal,
+        horizon_hours=horizon_hours,
+    )
 
     _save_eval(
         db_manager=db_manager,
@@ -534,11 +581,13 @@ def _evaluate_one(
         r_multiple=r_multiple,
         mae_pct=mae_pct,
         mfe_pct=mfe_pct,
+        **cost_fields,
     )
     logger.info(
         f"consensus_evaluator: id={rec_id} {ticker} {signal} → "
         f"dir={direction_correct} target_hit={target_hit} stop_hit={stop_hit} first_hit={first_hit} "
-        f"pnl={pnl_pct:.2f}% MAE={mae_pct} MFE={mfe_pct} R={r_multiple}"
+        f"pnl={pnl_pct:.2f}% net={cost_fields.get('net_pnl_pct')}% "
+        f"MAE={mae_pct} MFE={mfe_pct} R={r_multiple}"
     )
     return "EVALUATED"
 

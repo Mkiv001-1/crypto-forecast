@@ -64,6 +64,21 @@ def submit_manual_from_consensus(
             "confidence": confidence,
         }
 
+    from scripts.core.meta_label.config import load_meta_label_config
+
+    meta_cfg = load_meta_label_config(db_manager)
+    if meta_cfg.enabled and meta_cfg.enforce:
+        meta_decision = (consensus.get("meta_decision") or "").upper()
+        meta_score = consensus.get("meta_score")
+        if meta_decision == "REJECT":
+            return {
+                "status": "SKIPPED_META_LABEL",
+                "order_ids": [],
+                "message": f"Meta-label rejected (score={meta_score})",
+                "consensus_signal": signal,
+                "confidence": confidence,
+            }
+
     if stop_loss is not None:
         consensus["stop_loss"] = stop_loss
     if target_price is not None:

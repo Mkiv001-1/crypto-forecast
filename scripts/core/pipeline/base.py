@@ -18,6 +18,11 @@ class PipelineContext:
     consensus: Optional[dict] = None
     has_consensus: bool = False
     skipped_forecast_exposure: bool = False
+    meta_score: Optional[float] = None
+    meta_decision: Optional[str] = None
+    meta_model_version: Optional[str] = None
+    meta_features: Dict[str, Any] = field(default_factory=dict)
+    meta_order_blocked: bool = False
 
 
 class PipelineStage(Protocol):

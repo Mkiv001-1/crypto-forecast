@@ -6,6 +6,12 @@ from typing import Tuple
 def skip_forecast_when_exposed(db_manager) -> bool:
     """Whether to skip LLM forecasts when the ticker already has exposure."""
     try:
+        dataset = db_manager.get_config_value("META_DATASET_MODE", "false")
+        if str(dataset).strip().lower() in ("1", "true", "yes", "on"):
+            return False
+    except Exception:
+        pass
+    try:
         raw = db_manager.get_config_value("SKIP_FORECAST_WHEN_EXPOSED", "true")
         return str(raw).strip().lower() in ("1", "true", "yes", "on")
     except Exception:
