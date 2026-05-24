@@ -1,0 +1,23 @@
+[project]
+name = "crypto-forecast"
+version = "1.0.0"
+description = "Crypto forecast trading robot"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["scripts/tests"]
+python_files = ["test_*.py"]
+addopts = "-m \"not integration\""
+markers = [
+    "integration: integration tests that may depend on external services",
+    "slow: tests that take more than 5 seconds",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true

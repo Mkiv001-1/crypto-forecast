@@ -1,0 +1,57 @@
+# Secrets — never commit real API keys
+secrets.ini
+
+# Environment files
+.env
+.env.*
+*.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv*/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.code-workspace
+
+# Database (local state)
+database/*.db
+database/*.db-shm
+database/*.db-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Local config (use *.example templates)
+scripts/server/ini/server_config.ini
+scripts/client/ini/client_config.ini
+
+# Test / runtime artifacts
+.pytest_cache/
+*.pid
+.client.pid
+.server.pid
+_tmp*
+
+# Tooling
+.kilo/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build / dist
+dist/
+build/
+*.egg-info/
